@@ -1,0 +1,56 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "RadioPile: a preprocessing pipeline for RF IQ datasets"
+abstract: >
+  A modular preprocessing pipeline for RF IQ datasets, producing unified
+  ML-ready HDF5 files with rich per-window metadata. Covers technology
+  recognition, modulation classification, and radar waveform recognition
+  across real-world and simulated datasets.
+authors:
+  - family-names: Vanparys
+    given-names: Xander
+    affiliation: "Ghent University, IDLab, imec"
+    country: BE
+version: "1.0.0"
+date-released: "2026-10-12"
+license: Apache-2.0
+doi: "10.5281/zenodo.23174413"
+repository-code: "https://github.com/xandervanparys/RadioPile"
+keywords:
+  - "RF sensing"
+  - "IQ data"
+  - "machine learning"
+  - "dataset preprocessing"
+  - "technology recognition"
+  - "modulation classification"
+  - "HDF5"
+references:
+  - type: data
+    title: "RadioPile v1.0: A Unified Multi-Task RF IQ Collection"
+    doi: "10.5281/zenodo.22876704"
+    notes: "The aggregated corpus: 25,836,227 IQ windows unifying seven sources."
+    authors:
+      - family-names: Vanparys
+        given-names: Xander
+      - family-names: Cheraghinia
+        given-names: Mohammad
+      - family-names: De Poorter
+        given-names: Eli
+      - family-names: Shahid
+        given-names: Adnan
+  - type: data
+    title: "RadioPile v1.0: Per-Dataset Files"
+    doi: "10.5281/zenodo.22877108"
+    notes: >
+      The seven source datasets processed individually, at native window sizes.
+      Each file retains its original source license.
+    authors:
+      - family-names: Vanparys
+        given-names: Xander
+      - family-names: Cheraghinia
+        given-names: Mohammad
+      - family-names: De Poorter
+        given-names: Eli
+      - family-names: Shahid
+        given-names: Adnan

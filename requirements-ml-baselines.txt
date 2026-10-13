@@ -1,0 +1,22 @@
+# RadioPile — paper baseline dependencies.
+#
+# Needed ONLY to run the two baselines in ml-baselines/. The preprocessing
+# pipeline, the dataset builders, the validator, and the test suite all run
+# without these. Install alongside the core requirements:
+#
+#     pip install -r requirements.txt -r requirements-ml-baselines.txt
+#
+# Pinned to the version the published baseline numbers were produced with.
+# ml-baselines/README.md gives the per-run results measured on this exact version;
+# a different TensorFlow may land outside their range for reasons unrelated to
+# the data.
+#
+# For macOS on Apple Silicon, substitute tensorflow-macos at the same version.
+#
+# For an NVIDIA GPU on Linux, substitute 'tensorflow[and-cuda]==2.21.0': the
+# plain wheel below does not bring the CUDA/cuDNN libraries with it and falls
+# back to CPU. It is not the default because the published numbers are CPU runs
+# and the extra pulls several GB of NVIDIA wheels that a CPU reproduction does
+# not need.
+
+tensorflow==2.21.0

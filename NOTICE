@@ -1,0 +1,48 @@
+RadioPile — RF Dataset Preprocessing Pipeline
+Copyright 2026 Xander Vanparys, Ghent University, IDLab, imec
+
+This product includes software developed at
+Ghent University, IDLab, imec.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+--------------------------------------------------------------------------
+Source datasets
+--------------------------------------------------------------------------
+
+The Apache License above covers the source code in this repository only.
+
+This pipeline processes third-party RF datasets that are NOT distributed
+with this source code and that carry their own, separate licenses. Those
+licenses are unaffected by the Apache License and continue to govern any
+dataset artifact this pipeline produces from them.
+
+The authoritative per-dataset license record is the LICENSE constant in
+each datasets/<name>/config.py. At the time of writing:
+
+  sub_ghz                               CC-BY-NC-SA-4.0
+  lte_wifi_dvbt                         CC-BY-NC-SA-4.0
+  rml2016_10a                           CC-BY-NC-SA-4.0
+  rml2018_01a                           CC-BY-NC-SA-4.0
+  radchar                               CC-BY-NC-SA-4.0
+  its_band                              CC-BY-4.0
+  nist_wifi_bluetooth                   NIST-public-domain (NIST data terms)
+
+Aggregated artifacts inherit the most restrictive license present among
+their inputs. Every generated artifact ships a *.croissant.json sidecar
+carrying its license and the canonical citation for its source dataset.
+Users redistributing generated datasets must comply with those terms and
+attribute the original dataset authors.
+
+See release_templates/LICENSES.md for the per-file breakdown shipped with
+release bundles.

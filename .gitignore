@@ -1,0 +1,53 @@
+# ------------------------------------------------------------------------------
+# Dataset data (never commit raw or processed data)
+# ------------------------------------------------------------------------------
+
+data/**
+
+# Allow placeholder files to keep directory structure
+!data/**/.gitkeep
+
+# ------------------------------------------------------------------------------
+# Generated artifacts
+# ------------------------------------------------------------------------------
+
+*.h5
+*.hdf5
+*.croissant.json
+
+# Built release bundles (HDF5s, sidecars, config snapshots, reports, copied
+# READMEs). These are reproducible build outputs — `make release` regenerates
+# them from data/ + release_templates/. Anchored to the repo root so it cannot
+# match anything else; release_templates/ is the tracked source and is a
+# separate path, unaffected by this rule.
+/release/
+
+# ------------------------------------------------------------------------------
+# Training outputs
+# ------------------------------------------------------------------------------
+
+# Baseline run artifacts (checkpoints, confusion matrices, curves). Reproducible
+# via ml-baselines/*.py — commit the script, not its outputs.
+ml-baselines/results/
+
+# ------------------------------------------------------------------------------
+# Python
+# ------------------------------------------------------------------------------
+
+__pycache__/
+*.py[cod]
+.venv/
+.venv_pipeline*
+.env
+.DS_Store
+
+# pytest writes a self-ignoring .gitignore inside this directory, so it is
+# already invisible to git. Listed explicitly so it stays ignored even if that
+# auto-generated file is removed.
+.pytest_cache/
+
+# ------------------------------------------------------------------------------
+# Figures
+# ------------------------------------------------------------------------------
+# Editable figure sources stay local; the repository ships the rendered figures.
+figures/*.pptx

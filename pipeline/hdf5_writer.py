@@ -1,0 +1,366 @@
+"""
+HDF5 dataset construction utilities.
+
+Responsibilities:
+- Create extendable HDF5 datasets
+- Append window batches
+- Store metadata and attributes
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from pathlib import Path
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+
+import h5py
+import numpy as np
+
+from pipeline.io import write_config_snapshot
+from pipeline.labels import get_label_names, get_or_create_label_id, reset_label_registry
+from pipeline.schemas import H5_STR_DTYPE, REQUIRED_WINDOW_META, WindowMetaField
+
+
+def _sanitize_hdf5_attr(value: object) -> object:
+    """
+    Convert Python objects into HDF5-compatible attribute values.
+
+    Notes
+    -----
+    - HDF5 attrs do not support None, so it is encoded as a sentinel string.
+    - Complex / nested objects are stringified to keep attribute writing robust.
+    """
+    if value is None:
+        return "__NONE__"
+
+    if isinstance(value, (str, int, float, bool, np.number)):
+        return value
+
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value)
+
+    if isinstance(value, dict):
+        return "; ".join(f"{k}={v}" for k, v in value.items())
+
+    return str(value)
+
+
+def _coerce_window_meta_value(field: WindowMetaField, meta: Dict[str, object], source_path: Path) -> object:
+    """
+    Read one per-window meta value, applying fill values and light coercions.
+    """
+    # Special-case: if iterator didn't provide source_file, fall back to current file.
+    if field.key == "source_file":
+        v = meta.get(field.key, str(source_path))
+    else:
+        v = meta.get(field.key, field.fill_value)
+
+    if v is None:
+        v = field.fill_value
+
+    # Coerce numerics; leave strings as-is.
+    if field.dtype in ("float32", "float64"):
+        try:
+            return float(v)
+        except Exception:
+            return float(field.fill_value)
+    if field.dtype in ("int32", "int64"):
+        try:
+            return int(v)
+        except Exception:
+            return int(field.fill_value)
+    if field.dtype == "bool":
+        return bool(v)
+
+    # string dtype (or anything else) -> str.
+    # Unwrap Enum members explicitly rather than relying on their __str__:
+    # this is the boundary where a value becomes bytes on disk, so it should
+    # not depend on how a caller's enum happens to be declared.
+    if field.dtype == H5_STR_DTYPE:
+        if isinstance(v, Enum):
+            v = v.value
+        return str(v)
+
+    return v
+
+
+def build_hdf5_dataset(
+    *,
+    output_path: Path,
+    data_dir: Optional[Path] = None,
+    window_iterator_fn: Optional[Callable] = None,
+    window_iterator: Optional[Iterator[Tuple]] = None,
+    batch_size: int = 64,
+    data_dtype: str = "float32",
+    global_metadata: Optional[Dict[str, object]] = None,
+    window_metadata_schema: Optional[Sequence[WindowMetaField]] = None,
+) -> Dict[str, object]:
+    """
+    Build an ML-ready HDF5 dataset from raw files.
+
+    Consumes (window, label_name, metadata) tuples and writes them in batches to an
+    extendable HDF5 file: /data with shape (N, 2, W), /labels, /label_names and
+    /meta/*. Each window has shape (2, window_size): row 0 is I, row 1 is Q.
+
+    Parameters
+    ----------
+    output_path : Path
+        Path where the output HDF5 file will be written. Created or overwritten as necessary.
+
+    data_dir : Path, optional
+        Path to the root directory containing input files to be processed.
+        Required when using file-based mode (window_iterator_fn). Ignored when window_iterator is provided.
+
+    window_iterator_fn : Callable, optional
+        Function called once per file under data_dir, as window_iterator_fn(path), that yields
+        (window: np.ndarray, label_name: str, metadata: dict) tuples for that file.
+        Used in file-based mode together with data_dir. Mutually exclusive with window_iterator.
+
+    window_iterator : Iterator, optional
+        Iterator that directly yields (window: np.ndarray, label_name: str, metadata: dict) tuples.
+        Use this when windows do not come from files on disk (e.g. aggregation pipeline).
+        Mutually exclusive with window_iterator_fn / data_dir.
+
+    batch_size : int, default=64
+        Number of windows per write-batch in the HDF5 file, for I/O efficiency.
+
+    data_dtype : str, default="float32"
+        NumPy dtype string used to store the windowed IQ data (e.g. "float32" for single precision).
+        Must match the dtype of windows yielded by window_iterator_fn.
+
+    global_metadata : dict, optional
+        Key-value pairs to be persisted as root-level attributes in the HDF5 file (e.g., provenance, dataset version, global stats).
+
+    window_metadata_schema : Sequence[WindowMetaField], optional
+        Optional schema defining additional per-window metadata fields to store.
+
+        Two types of fields can be included:
+
+        1. **Windowing-generated fields** (e.g., "start_idx", "padded"):
+           Automatically generated by windowing functions and always available in the
+           metadata dict. They are stored in HDF5 only if the schema includes them.
+           See `pipeline.schemas.WINDOWING_META_FIELDS` for convenience constants.
+
+        2. **Dataset-specific custom fields** (e.g., "center_frequency_hz", "gain_db"):
+           Added by the dataset-specific window iterator function. Must be included
+           in the schema to be stored in HDF5.
+
+        Each WindowMetaField specifies the key in metadata, HDF5 dataset name, dtype, and fill value.
+
+    Returns
+    -------
+    dict
+        Summary of the build: "total_windows", "label_names" and
+        "config_snapshot_path".
+
+    Notes
+    -----
+    - If the output path already exists and is a directory, an error is raised.
+    - Per-window metadata datasets are created dynamically based on the provided schema.
+    - Required fields (currently just "file_path") are always included automatically.
+    - Windowing-generated fields ("start_idx", "padded") are available in metadata but only
+      stored if explicitly included in window_metadata_schema.
+    - Dataset-specific custom fields must be provided by window_iterator_fn and included
+      in window_metadata_schema to be stored.
+    - Label names are stored in /label_names and can be accessed via label_names[labels[i]] for window i.
+    - This function is designed to be used with varied domains by supplying a custom window_iterator_fn and metadata schema.
+    """
+    # Validate input mode: exactly one of (window_iterator) or (data_dir + window_iterator_fn).
+    if window_iterator is not None:
+        if window_iterator_fn is not None or data_dir is not None:
+            raise ValueError(
+                "Provide either window_iterator OR (data_dir + window_iterator_fn), not both."
+            )
+    else:
+        if data_dir is None or window_iterator_fn is None:
+            raise ValueError(
+                "Provide either window_iterator OR both data_dir and window_iterator_fn."
+            )
+
+    # Ensure label IDs start from 0 for each build (important because the
+    # label registry is process-global and can otherwise be polluted by
+    # previous dataset builds in the same Python process).
+    reset_label_registry()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_path.exists() and output_path.is_dir():
+        raise IsADirectoryError(f"Output path is a directory: {output_path}")
+
+    # Decide per-window metadata schema.
+    #
+    # Datasets must explicitly define any optional per-window metadata they
+    # want to persist.
+    custom_fields: List[WindowMetaField] = list(window_metadata_schema or [])
+    selected_fields: List[WindowMetaField] = list(REQUIRED_WINDOW_META) + custom_fields
+
+    # Validate schema: unique HDF5 dataset names.
+    h5_names = [f.h5_name for f in selected_fields]
+    dups = sorted({n for n in h5_names if h5_names.count(n) > 1})
+    if dups:
+        raise ValueError(
+            "Duplicate /meta dataset names in selected schema: " + ", ".join(dups)
+        )
+
+    total_windows = 0
+
+    with h5py.File(output_path, "w") as f:
+        # ------------------------------------------------------------------
+        # Create extendable datasets
+        # ------------------------------------------------------------------
+        d_data = None
+        window_size = None
+        d_labels = f.create_dataset(
+            "labels",
+            shape=(0,),
+            maxshape=(None,),
+            dtype="int64",
+            chunks=(batch_size,),
+        )
+
+        meta_grp = f.create_group("meta")
+
+        # Metadata datasets (1:1 with windows), created dynamically from schema.
+        meta_datasets: Dict[str, h5py.Dataset] = {}
+        for field in selected_fields:
+            meta_datasets[field.h5_name] = meta_grp.create_dataset(
+                field.h5_name,
+                shape=(0,),
+                maxshape=(None,),
+                dtype=field.dtype,
+                chunks=(batch_size,),
+            )
+
+        # ------------------------------------------------------------------
+        # Batch buffers
+        # ------------------------------------------------------------------
+        bw: List[np.ndarray] = []
+        bl: List[int] = []
+        meta_buffers: Dict[str, List[object]] = {field.h5_name: [] for field in selected_fields}
+
+        window_size: Optional[int] = None
+
+        def flush() -> None:
+            nonlocal total_windows, window_size, d_data
+
+            if not bw:
+                return
+
+            n = len(bw)
+
+            if d_data is None:
+                window_size = bw[0].shape[1]
+
+                d_data = f.create_dataset(
+                    "data",
+                    shape=(0, 2, window_size),
+                    maxshape=(None, 2, window_size),
+                    dtype=data_dtype,
+                    chunks=(batch_size, 2, window_size),
+                )
+
+            new_size = total_windows + n
+
+            d_data.resize((new_size, 2, window_size))
+            d_labels.resize((new_size,))
+            for ds in meta_datasets.values():
+                ds.resize((new_size,))
+
+            d_data[total_windows:new_size] = np.stack(bw, axis=0).astype(data_dtype)
+            d_labels[total_windows:new_size] = np.asarray(bl, dtype=np.int64)
+
+            for field in selected_fields:
+                ds = meta_datasets[field.h5_name]
+                buf = meta_buffers[field.h5_name]
+                if field.dtype == H5_STR_DTYPE:
+                    ds[total_windows:new_size] = np.asarray(buf, dtype=object)
+                elif field.dtype == "bool":
+                    ds[total_windows:new_size] = np.asarray(buf, dtype=bool)
+                elif field.dtype in ("int32", "int64"):
+                    ds[total_windows:new_size] = np.asarray(buf, dtype=field.dtype)
+                else:
+                    ds[total_windows:new_size] = np.asarray(buf, dtype=float)
+
+            total_windows = new_size
+
+            bw.clear()
+            bl.clear()
+            for buf in meta_buffers.values():
+                buf.clear()
+
+        # ------------------------------------------------------------------
+        # Iterate windows — direct iterator or file-based
+        # ------------------------------------------------------------------
+        if window_iterator is not None:
+            sentinel_path = Path("")
+            for window, label_name, meta in window_iterator:
+                label_id = get_or_create_label_id(label_name)
+                bw.append(window)
+                bl.append(label_id)
+                for field in selected_fields:
+                    meta_buffers[field.h5_name].append(
+                        _coerce_window_meta_value(field, meta, sentinel_path)
+                    )
+                if len(bw) >= batch_size:
+                    flush()
+        else:
+            for path in sorted(data_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+
+                print(f"  {path.name}")
+
+                for window, label_name, meta in window_iterator_fn(path):
+                    label_id = get_or_create_label_id(label_name)
+
+                    bw.append(window)
+                    bl.append(label_id)
+
+                    for field in selected_fields:
+                        meta_buffers[field.h5_name].append(_coerce_window_meta_value(field, meta, path))
+                    if len(bw) >= batch_size:
+                        flush()
+
+        flush()
+
+        # ------------------------------------------------------------------
+        # Store label map
+        # ------------------------------------------------------------------
+        label_names = get_label_names()
+
+        f.create_dataset("label_names", data=label_names, dtype=H5_STR_DTYPE)
+
+        # ------------------------------------------------------------------
+        # Global attributes
+        # ------------------------------------------------------------------
+        f.attrs["total_windows"] = total_windows
+
+        if global_metadata:
+            for k, v in global_metadata.items():
+                f.attrs[k] = _sanitize_hdf5_attr(v)
+
+        # ------------------------------------------------------------------
+        # Ensure /data exists even if no windows were written
+        # ------------------------------------------------------------------
+        if d_data is None:
+            # No windows were produced; create an empty dataset
+            # Use window_size=0 to indicate absence of data
+            d_data = f.create_dataset(
+                "data",
+                shape=(0, 2, 0),
+                maxshape=(None, 2, None),
+                dtype=data_dtype,
+                chunks=(1, 2, 1),
+            )
+
+    # Write standalone configuration snapshot alongside the HDF5.
+    # Contains the same config dict written to HDF5 root attributes, plus a
+    # timestamp and (when in a git repo) the build-time commit SHA.
+    snapshot_path = write_config_snapshot(output_path, global_metadata or {})
+
+    return {
+        "total_windows": int(total_windows),
+        "label_names": label_names,
+        "config_snapshot_path": snapshot_path,
+    }
